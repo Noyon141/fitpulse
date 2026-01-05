@@ -27,7 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Goals
   final int _waterGoal = 2500;
-  final int _stepGoal = 6000;
+  final int _stepGoal = 2000;
 
   // Pedometer State
   late Stream<StepCount> _stepCountStream;
