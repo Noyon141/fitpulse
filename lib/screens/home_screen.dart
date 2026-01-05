@@ -1,4 +1,4 @@
-// ignore_for_file: avoid_print
+// ignore_for_file: unused_field, avoid_print, deprecated_member_use
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -7,6 +7,7 @@ import 'package:pedometer/pedometer.dart';
 import 'package:percent_indicator/circular_percent_indicator.dart';
 import 'package:percent_indicator/linear_percent_indicator.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/supabase_service.dart';
 
@@ -20,24 +21,27 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final SupabaseService _service = SupabaseService();
 
-  // State Variables
+  // Data State
   int _waterIntake = 0;
   int _steps = 0;
 
-  // Goals (You could make these editable in a settings screen later)
+  // Goals
   final int _waterGoal = 2500;
   final int _stepGoal = 6000;
 
+  // Pedometer State
   late Stream<StepCount> _stepCountStream;
+  int _stepOffset = 0; // The sensor value at the "start" of our counting
+  bool _isInitialized = false;
 
   @override
   void initState() {
     super.initState();
-    _initData();
-    _initPedometer();
+    _initAll();
   }
 
-  Future<void> _initData() async {
+  Future<void> _initAll() async {
+    // Load data from Supabase
     final data = await _service.getTodayStats();
     if (mounted) {
       setState(() {
@@ -45,18 +49,71 @@ class _HomeScreenState extends State<HomeScreen> {
         _steps = data['steps'] ?? 0;
       });
     }
+
+    // Start Pedometer listening
+    _initPedometer();
   }
 
   Future<void> _initPedometer() async {
     await Permission.activityRecognition.request();
+
     _stepCountStream = Pedometer.stepCountStream;
+
     _stepCountStream
-        .listen((StepCount event) {
-          setState(() => _steps = event.steps);
-          // Debounce this in a real app, but for now it's fine
+        .listen((StepCount event) async {
+          if (!mounted) return;
+
+          int sensorSteps = event.steps;
+          SharedPreferences prefs = await SharedPreferences.getInstance();
+
+          String todayKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
+          String? savedDate = prefs.getString('last_step_date');
+          int? savedOffset = prefs.getInt('day_step_offset');
+
+          //If it's a NEW day, or we haven't set an offset yet
+          if (savedDate != todayKey || savedOffset == null) {
+            // Set new offset
+            _stepOffset = sensorSteps - _steps;
+
+            // Save these for future events
+            await prefs.setString('last_step_date', todayKey);
+            await prefs.setInt('day_step_offset', _stepOffset);
+          } else {
+            // Use existing offset
+            _stepOffset = savedOffset;
+          }
+
+          // Calculate real steps for today
+          int calculatedSteps = sensorSteps - _stepOffset;
+
+          // Handle corner case: Device rebooted (sensor resets to 0, making result negative)
+          if (calculatedSteps < 0) {
+            _stepOffset = sensorSteps; // Reset offset
+            calculatedSteps = 0;
+            await prefs.setInt('day_step_offset', _stepOffset);
+          }
+
+          setState(() {
+            _steps = calculatedSteps;
+            _isInitialized = true;
+          });
+
+          // Update Database
           _service.updateSteps(_steps);
         })
-        .onError((error) => print('Pedometer Error: $error'));
+        .onError((error) {
+          print('Pedometer Error: $error');
+        });
+  }
+
+  // RESET BUTTON LOGIC
+  Future<void> _resetSteps() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    setState(() => _steps = 0);
+    _service.updateSteps(0);
+
+    await prefs.remove('day_step_offset');
   }
 
   void _addWater(int amount) {
@@ -64,19 +121,15 @@ class _HomeScreenState extends State<HomeScreen> {
     _service.updateWater(_waterIntake);
   }
 
-  // Helper to calculate Calories (approx 0.04 cal per step)
   String get _calories => (_steps * 0.04).toStringAsFixed(0);
-
-  // Helper to calculate Distance (approx 0.0008 km per step)
   String get _distance => (_steps * 0.0008).toStringAsFixed(1);
 
   @override
   Widget build(BuildContext context) {
-    // Get current date for the header
     String dateString = DateFormat('EEEE, d MMMM').format(DateTime.now());
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F7FA), // Light Grey Background
+      backgroundColor: const Color(0xFFF5F7FA),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -88,7 +141,6 @@ class _HomeScreenState extends State<HomeScreen> {
             fontSize: 24,
           ),
         ),
-        centerTitle: false,
         actions: [
           IconButton(
             icon: const Icon(Icons.logout, color: Colors.black54),
@@ -101,7 +153,6 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 1. DATE HEADER
             Text(
               "Today's Overview",
               style: GoogleFonts.poppins(fontSize: 14, color: Colors.grey),
@@ -116,15 +167,9 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
 
             const SizedBox(height: 25),
-
-            // 2. ACTIVITY CARD (Gradient & Details)
             _buildActivityCard(),
-
             const SizedBox(height: 25),
-
-            // 3. HYDRATION CARD (Circular + Quick Add)
             _buildHydrationCard(),
-
             const SizedBox(height: 30),
           ],
         ),
@@ -139,7 +184,6 @@ class _HomeScreenState extends State<HomeScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        // Modern Gradient
         gradient: const LinearGradient(
           colors: [Color(0xFF4facfe), Color(0xFF00f2fe)],
           begin: Alignment.topLeft,
@@ -148,7 +192,7 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.circular(25),
         boxShadow: [
           BoxShadow(
-            color: Colors.blue.withValues(alpha: 77),
+            color: Colors.blue.withOpacity(0.3),
             blurRadius: 15,
             offset: const Offset(0, 10),
           ),
@@ -168,7 +212,22 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.w500,
                 ),
               ),
-              const Icon(Icons.directions_walk, color: Colors.white70),
+              // RESET BUTTON
+              GestureDetector(
+                onTap: _resetSteps,
+                child: Container(
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.refresh,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 10),
@@ -193,15 +252,14 @@ class _HomeScreenState extends State<HomeScreen> {
             barRadius: const Radius.circular(10),
             padding: EdgeInsets.zero,
             animation: true,
+            animateFromLastPercent: true,
           ),
           const SizedBox(height: 20),
-          // Sub-stats: Calories & Distance
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               _buildStatItem(Icons.local_fire_department, "$_calories kcal"),
               _buildStatItem(Icons.location_on, "$_distance km"),
-              _buildStatItem(Icons.timer, "0h 0m"), // Placeholder for time
             ],
           ),
         ],
@@ -235,7 +293,7 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.circular(25),
         boxShadow: [
           BoxShadow(
-            color: Colors.grey.withValues(alpha: 26),
+            color: Colors.grey.withOpacity(0.1),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -265,19 +323,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ],
               ),
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.blue.shade50,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.water_drop, color: Colors.blueAccent),
-              ),
+              const Icon(Icons.water_drop, color: Colors.blueAccent),
             ],
           ),
           const SizedBox(height: 20),
-
-          // Circular Indicator
           CircularPercentIndicator(
             radius: 70.0,
             lineWidth: 12.0,
@@ -304,10 +353,7 @@ class _HomeScreenState extends State<HomeScreen> {
             progressColor: const Color(0xFF4facfe),
             backgroundColor: Colors.blue.shade50,
           ),
-
           const SizedBox(height: 30),
-
-          // Quick Add Buttons
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
@@ -328,7 +374,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 "500ml",
                 500,
                 Icons.check_box_outline_blank_rounded,
-              ), // Generic bottle shape
+              ),
             ],
           ),
         ],
@@ -349,9 +395,9 @@ class _HomeScreenState extends State<HomeScreen> {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.blue.withValues(alpha: 13),
+              color: Colors.blue.withOpacity(0.05),
               borderRadius: BorderRadius.circular(15),
-              border: Border.all(color: Colors.blue.withValues(alpha: 26)),
+              border: Border.all(color: Colors.blue.withOpacity(0.1)),
             ),
             child: Icon(icon, color: Colors.blueAccent, size: 24),
           ),
